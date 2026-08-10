@@ -1,0 +1,19 @@
+# Local config
+config.local.js
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Node / build outputs
+node_modules/
+dist/
+build/
+.next/
+coverage/
+
+# Supabase local
+.supabase/
