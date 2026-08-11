@@ -1,0 +1,42 @@
+name: Collect artist updates
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger Supabase collector
+        env:
+          COLLECT_SHARED_SECRET: ${{ secrets.COLLECT_SHARED_SECRET }}
+          COLLECT_URL: https://gvrzchxbnnxgaysadqdd.supabase.co/functions/v1/collect
+        run: |
+          if [ -z "$COLLECT_SHARED_SECRET" ]; then
+            echo "COLLECT_SHARED_SECRET repository secret is not configured."
+            exit 1
+          fi
+
+          response_file="$(mktemp)"
+          status="$(curl --silent --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "x-collect-secret: $COLLECT_SHARED_SECRET" \
+            --header 'content-type: application/json' \
+            --data '{}' \
+            "$COLLECT_URL")"
+
+          cat "$response_file"
+          echo
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "Collector returned HTTP $status"
+            exit 1
+          fi
