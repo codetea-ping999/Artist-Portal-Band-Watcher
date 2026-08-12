@@ -50,14 +50,9 @@ export async function createRepository(config = {}) {
           events: events.data ?? []
         };
       },
-      async addArtist() {
-        throw new Error('Supabase mode is read-only in this MVP. Add artists via SQL Editor or build the admin auth flow next.');
-      },
-      async resetDemo() {
-        throw new Error('Supabase mode cannot reset remote data from the browser.');
-      }
+      readOnly: true
     };
-  } catch (error) {
+   } catch (error) {
     console.warn('Supabase connection failed. Falling back to local demo mode.', error);
     return createLocalRepository();
   }

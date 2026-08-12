@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "npm:@supabase/supabase-js@2.111.0";
+import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2.111.0";
 
 type Source = {
   id: string;
@@ -19,6 +19,26 @@ type CollectedPost = {
   external_id: string;
   published_at: string;
   raw_hash: string;
+};
+
+type CollectedEvent = {
+  artist_id: string;
+  source_id: string;
+  title: string;
+  venue: string;
+  city: string;
+  starts_at: string;
+  status: string;
+  source_url: string;
+  notes?: string;
+  raw_hash: string;
+};
+
+type CollectionResult = {
+  posts: CollectedPost[];
+  events: CollectedEvent[];
+  skipped?: boolean;
+  reason?: string;
 };
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
@@ -134,7 +154,6 @@ function parseFeed(source: Source, body: string) {
   const atomEntries = [...body.matchAll(/<entry\b[\s\S]*?<\/entry>/gi)].map((match) => match[0]);
   return atomEntries.slice(0, 25).map((block) => feedPost(source, block, "atom"));
 }
-
 function parseHtmlSnapshot(source: Source, body: string): CollectedPost[] {
   const title = stripHtml(body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? source.label);
   const descriptionMatch =
@@ -157,6 +176,39 @@ function parseHtmlSnapshot(source: Source, body: string): CollectedPost[] {
       raw_hash: snapshotHash
     }
   ];
+}
+
+function parseHtmlEvents(source: Source, body: string): CollectedEvent[] {
+  const events: CollectedEvent[] = [];
+  // This is a placeholder for more sophisticated parsing logic.
+  // For now, we look for common patterns in live pages (e.g., 9mm's site).
+  // We look for table rows or list items that contain dates and venues.
+  const lines = body.split('\n');
+  for (const line of lines) {
+    // Simple regex attempt to find date-like strings and venue-like text in common formats.
+    // Example: "2026.08.11 MON 渋谷..."
+    const dateMatch = line.match(/(\d{4})[\.\/-](\d{1,2})[\.\/-](\d{1,2})/);
+    if (dateMatch) {
+      const dateStr = datetoISODate(dateMatch[1], dateMatch[2], dateMatch[3]);
+      const venue = line.replace(dateMatch[0], '').replace(/<[^>]+>/g, ' ').trim() || '不明';
+      events.push({
+        artist_id: source.artist_id,
+        source_id: source.id,
+        title: source.label,
+        venue: venue,
+        city: '',
+        starts_at: new Date(dateStr).toISOString(),
+        status: 'announced',
+        source_url: source.url,
+        raw_hash: hashText(`${source.id}:${dateStr}:${venue}`)
+      });
+    }
+  }
+  return events;
+}
+
+function datetoISODate(year: string, month: string, day: string) {
+  return `${year.padStart(4, '0')}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00.000Z`;
 }
 
 async function fetchText(url: string) {
@@ -205,28 +257,37 @@ async function collectYouTube(source: Source) {
   return parseFeed(source, await fetchText(feedUrl));
 }
 
-async function collectSource(source: Source) {
+async function collectSource(source: Source): Promise<CollectionResult> {
   if (source.source_type === "x" || source.source_type === "instagram") {
-    return { skipped: true, reason: `${source.source_type} scraping is intentionally disabled`, posts: [] as CollectedPost[] };
+    return { skipped: true, reason: `${source.source_type} scraping is intentionally disabled`, posts: [], events: [] };
   }
 
   if (source.source_type === "youtube") {
-    return { skipped: false, posts: await collectYouTube(source) };
+    const posts = await collectYouTube(source);
+    return { skipped: false, posts, events: [] };
   }
 
   const body = await fetchText(source.url);
   const looksLikeFeed = source.source_type === "rss" || /<(rss|feed)\b/i.test(body.slice(0, 1200));
+
+  if (source.source_type === "live") {
+    const events = parseHtmlEvents(source, body);
+    return { skipped: false, posts: [], events };
+  }
+
   return {
     skipped: false,
-    posts: looksLikeFeed ? parseFeed(source, body) : parseHtmlSnapshot(source, body)
+    posts: looksLikeFeed ? parseFeed(source, body) : parseHtmlSnapshot(source, body),
+    events: []
   };
 }
 
 async function persistPosts(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient<any>,
   source: Source,
   posts: CollectedPost[]
 ) {
+  if (posts.length === 0) return { changed: 0, unchanged: 0 };
   const { data: existing, error: existingError } = await supabase
     .from("posts")
     .select("url, raw_hash")
@@ -242,6 +303,35 @@ async function persistPosts(
     const { error: upsertError } = await supabase
       .from("posts")
       .upsert(changed, { onConflict: "artist_id,url" });
+    if (upsertError) throw upsertError;
+  }
+
+  return { changed: changed.length, unchanged };
+}
+
+async function persistEvents(
+  supabase: SupabaseClient<any>,
+  source: Source,
+  events: CollectedEvent[]
+) {
+  if (events.length === 0) return { changed: 0, unchanged: 0 };
+  const { data: existing, error: existingError } = await supabase
+    .from("events")
+    .select("source_url, title, starts_at, raw_hash")
+    .eq("source_id", source.id);
+
+  if (existingError) throw existingError;
+
+  const hashes = new Map(
+    (existing ?? []).map((row) => [`${row.title}:${row.starts_at}:${row.source_url}`, row.raw_hash])
+  );
+  const changed = events.filter((event) => hashes.get(`${event.title}:${event.starts_at}:${event.source_url}`) !== event.raw_hash);
+  const unchanged = events.length - changed.length;
+
+  if (changed.length) {
+    const { error: upsertError } = await supabase
+      .from("events")
+      .upsert(changed, { onConflict: "artist_id,title,starts_at" });
     if (upsertError) throw upsertError;
   }
 
@@ -294,18 +384,21 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      const persisted = await persistPosts(supabase, source, collected.posts);
+      const persistedPosts = await persistPosts(supabase, source, collected.posts);
+      const persistedEvents = await persistEvents(supabase, source, collected.events);
       await supabase.from("sources").update({ last_checked_at: checkedAt }).eq("id", source.id);
       await supabase.from("update_logs").insert({
         source_id: source.id,
         status: "ok",
-        message: `${persisted.changed} changed, ${persisted.unchanged} unchanged`
+        message: `posts: ${persistedPosts.changed} changed, ${persistedPosts.unchanged} unchanged; events: ${persistedEvents.changed} changed, ${persistedEvents.unchanged} unchanged`
       });
       results.push({
         source: source.label,
         status: "ok",
-        fetched: collected.posts.length,
-        ...persisted
+        fetched_posts: collected.posts.length,
+        fetched_events: collected.events.length,
+        posts: persistedPosts,
+        events: persistedEvents
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

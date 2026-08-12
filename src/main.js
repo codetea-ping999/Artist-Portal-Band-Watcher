@@ -122,14 +122,15 @@ function renderShell() {
           <option value="all">すべて</option>
           ${state.artists.map((artist) => `<option value="${artist.id}" ${state.activeArtistId === artist.id ? 'selected' : ''}>${escapeHtml(artist.name)}</option>`).join('')}
         </select>
-        <nav class="tabs" aria-label="Main navigation">
-          ${tabButton('dashboard', 'ダッシュボード')}
-          ${tabButton('artists', 'アーティスト')}
-          ${tabButton('timeline', '更新タイムライン')}
-          ${tabButton('events', 'ライブ予定')}
-          ${tabButton('sources', '情報源')}
-        </nav>
-      </aside>
+       <nav class="tabs" aria-label="Main navigation">
+           ${tabButton('dashboard', 'ダッシュボード')}
+           ${tabButton('artists', 'アーティスト')}
+           ${tabButton('timeline', '更新タイムライン')}
+           ${tabButton('events', 'ライブ予定')}
+           ${tabButton('sources', '情報源')}
+           ${tabButton('admin', '管理')}
+         </nav>
+       </aside>
       <section class="content">
         ${state.error ? `<div class="notice notice--error">${escapeHtml(state.error.message)}</div>` : ''}
         ${renderActiveTab()}
@@ -152,10 +153,12 @@ function renderActiveTab() {
       return renderTimeline();
     case 'events':
       return renderEvents();
-    case 'sources':
-      return renderSources();
-    default:
-      return renderDashboard();
+     case 'sources':
+       return renderSources();
+     case 'admin':
+       return renderAdminTab();
+     default:
+       return renderDashboard();
   }
 }
 
@@ -206,21 +209,27 @@ function renderArtists() {
         ${artists.map(renderArtistCard).join('') || emptyState('該当するアーティストがありません。')}
       </div>
     </section>
-    <section class="panel">
-      <div class="section-title">
-        <h2>ローカルにアーティスト追加</h2>
-        <span>${state.mode === 'supabase' ? 'read-only MVP' : 'localStorage'}</span>
-      </div>
-      <form class="artist-form" id="artist-form">
-        <input name="name" placeholder="アーティスト名" required />
-        <input name="genre" placeholder="ジャンル / メモ" />
-        <input name="official_url" type="url" placeholder="公式URL" />
-        <textarea name="description" placeholder="推しポイント / 追跡方針"></textarea>
-        <button class="button button--primary" type="submit">追加</button>
-        <button class="button" type="button" data-action="reset-demo">デモに戻す</button>
-      </form>
-    </section>
+    ${state.mode === 'supabase' ? readOnlyNotice('アーティストの追加・編集はSupabaseのSQL Editor、または将来の認証付き管理画面で行ってください。') : `
+      <section class="panel">
+        <div class="section-title">
+          <h2>ローカルにアーティスト追加</h2>
+          <span>localStorage</span>
+        </div>
+        <form class="artist-form" id="artist-form">
+          <input name="name" placeholder="アーティスト名" required />
+          <input name="genre" placeholder="ジャンル / メモ" />
+          <input name="official_url" type="url" placeholder="公式URL" />
+          <textarea name="description" placeholder="推しポイント / 追跡方針"></textarea>
+          <button class="button button--primary" type="submit">追加</button>
+          <button class="button" type="button" data-action="reset-demo">デモに戻す</button>
+        </form>
+      </section>
+    `}
   `;
+}
+
+function readOnlyNotice(message) {
+  return `<section class="panel"><div class="section-title"><h2>読み取り専用</h2><span>Supabase</span></div><p>${escapeHtml(message)}</p></section>`;
 }
 
 function renderArtistCard(artist) {
@@ -348,7 +357,74 @@ function emptyState(message) {
   return `<div class="empty-state">${escapeHtml(message)}</div>`;
 }
 
+function renderAdminTab() {
+  if (state.mode === 'supabase') {
+    return readOnlyNotice('Supabase接続時のブラウザUIは読み取り専用です。情報源の追加・削除はSQL Editorまたは認証付き管理画面で行います。');
+  }
+  return `
+    <section class="panel">
+      <div class="section-title">
+        <h2>管理 (Admin)</h2>
+      </div>
+      <p>ローカルデモのソース（情報源）の追加・削除を行います。</p>
+
+      <div class="two-column">
+        <section class="panel">
+          <div class="section-title">
+            <h3>新しい情報源を追加</h3>
+          </div>
+          <form class="admin-form" id="source-add-form">
+            <label class="search-label" for="sa-artist">アーティスト</label>
+            <select name="artist_id" id="sa-artist" class="search" required>
+              <option value="">選択してください</option>
+              ${state.artists.map(a => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join('')}
+            </select>
+
+            <label class="search-label" for="sa-type">タイプ</label>
+            <select name="source_type" id="sa-type" class="search" required>
+              ${Object.entries(sourceLabels).map(([key, label]) => `<option value="${key}">${label}</option>`).join('')}
+            </select>
+
+            <label class="search-label" for="sa-label">ラベル (表示名)</label>
+            <input name="label" id="sa-label" class="search" placeholder="例: 公式サイト" required />
+
+            <label class="search-label" for="sa-url">URL</label>
+            <input name="url" id="sa-url" type="url" class="search" placeholder="https://..." required />
+
+            <button class="button button--primary" type="submit" style="margin-top: 10px;">追加</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">
+            <h3>登録済みソース一覧</h3>
+          </div>
+          <div class="source-table">
+            ${state.sources.map(s => `
+              <article class="source-row">
+                <div>
+                  <span class="badge">${escapeHtml(sourceLabels[s.source_type] ?? s.source_type)}</span>
+                  <strong>${escapeHtml(s.label)}</strong>
+                  <br><small>${escapeHtml(state.artists.find(a => a.id === s.artist_id)?.name || 'Unknown')}</small>
+                </div>
+                <button class="button button--danger" data-action="delete-source" data-id="${s.id}">削除</button>
+              </article>
+            `).join('') || '<p>ソースはありません。</p>'}
+          </div>
+        </section>
+      </div>
+
+      <div style="margin-top: 20px;">
+         <button class="button" data-action="reset-demo" style="color: #d32f2f;">デモデータをリセット (localStorageのみ)</button>
+      </div>
+    `;
+}
+
 function bindEvents() {
+  const reportActionError = (error) => {
+    state.error = error;
+    renderShell();
+  };
   app.querySelector('[data-action="refresh"]')?.addEventListener('click', async () => {
     await refreshData();
   });
@@ -385,15 +461,44 @@ function bindEvents() {
       await refreshData();
       state.activeTab = 'artists';
     } catch (error) {
-      alert(error.message);
+      reportActionError(error);
     }
   });
-  app.querySelector('[data-action="reset-demo"]')?.addEventListener('click', async () => {
+  app.querySelectorAll('[data-action="delete-source"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.id;
+      if (confirm('このソースを削除しますか？')) {
+        try {
+          await state.repository.deleteSource(id);
+          await refreshData();
+        } catch (error) {
+          reportActionError(error);
+        }
+      }
+    });
+  });
+
+  app.querySelector('#source-add-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const input = Object.fromEntries(formData.entries());
     try {
-      await state.repository.resetDemo();
+      await state.repository.addSource(input);
       await refreshData();
+      event.currentTarget.reset();
     } catch (error) {
-      alert(error.message);
+      reportActionError(error);
+    }
+  });
+
+  app.querySelector('[data-action="reset-demo"]')?.addEventListener('click', async () => {
+    if (confirm('デモデータをリセットしますか？（保存されている変更は消えます）')) {
+      try {
+        await state.repository.resetDemo();
+        await refreshData();
+      } catch (error) {
+        reportActionError(error);
+      }
     }
   });
 }

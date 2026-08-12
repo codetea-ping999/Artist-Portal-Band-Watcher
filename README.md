@@ -19,6 +19,8 @@
 
 X / Instagramは利用規約やAPI制約があるため、MVPでは自動スクレイピングせず公式リンクとして扱います。
 
+Supabase接続時のブラウザアプリは読み取り専用です。アーティストや情報源の追加・削除はSQL Editorで行い、公開キーによる書き込みは発生しません。Supabase未設定時のDemo / localStorage modeでは、UIからローカルデータを編集できます。
+
 ## すぐ起動する
 
 このMVPはビルド不要です。
@@ -55,10 +57,12 @@ update_logs  : collector実行ログ（非公開）
 | --- | --- |
 | `rss` | RSS / Atomの最新25件を取得 |
 | `youtube` | チャンネルIDを解決しYouTube公式Atom feedを取得 |
-| `official` / `label` / `blog` / `live` | HTMLタイトル・descriptionの差分を保存 |
+| `official` / `label` / `blog` | HTMLタイトル・descriptionの差分を保存 |
+| `live` | HTMLから検出した日付・会場をeventsへ保存 |
 | `x` / `instagram` | 自動取得せず `skipped` として記録 |
 
 同じURLかつ同じ内容ハッシュの場合は再保存しないため、毎時実行しても不要な更新を抑えます。
+イベントは `artist_id`・タイトル・開始日時の組み合わせで重複を抑えます。
 
 ### Edge Functionの環境変数
 
