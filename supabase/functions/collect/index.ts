@@ -1,12 +1,18 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2.111.0";
+import { parseLiveEvents } from "./live-parser.js";
 
 type Source = {
   id: string;
   artist_id: string;
+  artist_name: string;
   source_type: string;
   label: string;
   url: string;
+};
+
+type SourceRow = Omit<Source, "artist_name"> & {
+  artists?: { name?: string } | null;
 };
 
 type CollectedPost = {
@@ -28,6 +34,8 @@ type CollectedEvent = {
   venue: string;
   city: string;
   starts_at: string;
+  doors_at: string | null;
+  ticket_url: string | null;
   status: string;
   source_url: string;
   notes?: string;
@@ -112,6 +120,12 @@ function isoDate(value: string | undefined, fallback = new Date().toISOString())
   return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString();
 }
 
+function canonicalTimestamp(value: string | null | undefined) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
+}
+
 function feedPost(source: Source, block: string, kind: "rss" | "atom"): CollectedPost {
   const title = stripHtml(getTag(block, "title") || source.label);
   const atomLink = getAttribute(block, "link", "href");
@@ -178,39 +192,6 @@ function parseHtmlSnapshot(source: Source, body: string): CollectedPost[] {
   ];
 }
 
-function parseHtmlEvents(source: Source, body: string): CollectedEvent[] {
-  const events: CollectedEvent[] = [];
-  // This is a placeholder for more sophisticated parsing logic.
-  // For now, we look for common patterns in live pages (e.g., 9mm's site).
-  // We look for table rows or list items that contain dates and venues.
-  const lines = body.split('\n');
-  for (const line of lines) {
-    // Simple regex attempt to find date-like strings and venue-like text in common formats.
-    // Example: "2026.08.11 MON 渋谷..."
-    const dateMatch = line.match(/(\d{4})[\.\/-](\d{1,2})[\.\/-](\d{1,2})/);
-    if (dateMatch) {
-      const dateStr = datetoISODate(dateMatch[1], dateMatch[2], dateMatch[3]);
-      const venue = line.replace(dateMatch[0], '').replace(/<[^>]+>/g, ' ').trim() || '不明';
-      events.push({
-        artist_id: source.artist_id,
-        source_id: source.id,
-        title: source.label,
-        venue: venue,
-        city: '',
-        starts_at: new Date(dateStr).toISOString(),
-        status: 'announced',
-        source_url: source.url,
-        raw_hash: hashText(`${source.id}:${dateStr}:${venue}`)
-      });
-    }
-  }
-  return events;
-}
-
-function datetoISODate(year: string, month: string, day: string) {
-  return `${year.padStart(4, '0')}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00.000Z`;
-}
-
 async function fetchText(url: string) {
   const response = await fetch(url, {
     headers: {
@@ -271,7 +252,7 @@ async function collectSource(source: Source): Promise<CollectionResult> {
   const looksLikeFeed = source.source_type === "rss" || /<(rss|feed)\b/i.test(body.slice(0, 1200));
 
   if (source.source_type === "live") {
-    const events = parseHtmlEvents(source, body);
+    const events = parseLiveEvents(source, body);
     return { skipped: false, posts: [], events };
   }
 
@@ -322,10 +303,12 @@ async function persistEvents(
 
   if (existingError) throw existingError;
 
+  const eventKey = (event: { title: string; starts_at: string | null; source_url: string }) =>
+    `${event.title}:${canonicalTimestamp(event.starts_at)}:${event.source_url}`;
   const hashes = new Map(
-    (existing ?? []).map((row) => [`${row.title}:${row.starts_at}:${row.source_url}`, row.raw_hash])
+    (existing ?? []).map((row) => [eventKey(row), row.raw_hash])
   );
-  const changed = events.filter((event) => hashes.get(`${event.title}:${event.starts_at}:${event.source_url}`) !== event.raw_hash);
+  const changed = events.filter((event) => hashes.get(eventKey(event)) !== event.raw_hash);
   const unchanged = events.length - changed.length;
 
   if (changed.length) {
@@ -359,17 +342,22 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false }
   });
 
-  const { data: sources, error } = await supabase
+  const { data: sourceRows, error } = await supabase
     .from("sources")
-    .select("id, artist_id, source_type, label, url")
+    .select("id, artist_id, source_type, label, url, artists(name)")
     .eq("enabled", true)
     .order("source_type")
     .order("label");
 
   if (error) return json({ error: error.message }, 500);
 
+  const sources = ((sourceRows ?? []) as SourceRow[]).map(({ artists, ...source }) => ({
+    ...source,
+    artist_name: artists?.name ?? ""
+  }));
+
   const results = [];
-  for (const source of (sources ?? []) as Source[]) {
+  for (const source of sources as Source[]) {
     const checkedAt = new Date().toISOString();
     try {
       const collected = await collectSource(source);

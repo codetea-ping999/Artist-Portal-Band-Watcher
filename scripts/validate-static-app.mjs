@@ -9,6 +9,7 @@ const requiredFiles = [
   'src/styles.css',
   'supabase/migrations/20260810143000_initial_artist_portal.sql',
   'supabase/migrations/20260812120000_event_collector_fields.sql',
+  'supabase/functions/collect/live-parser.js',
   'supabase/functions/collect/index.ts'
 ];
 
@@ -28,7 +29,7 @@ if (!main.includes('Artist Portal')) {
   throw new Error('main.js should include the app title');
 }
 
-for (const required of ['persistEvents', 'source_url', 'onConflict: "artist_id,title,starts_at"']) {
+for (const required of ['parseLiveEvents', 'persistEvents', 'source_url', 'doors_at', 'artists(name)', 'onConflict: "artist_id,title,starts_at"']) {
   if (!collector.includes(required)) {
     throw new Error(`collector is missing ${required}`);
   }

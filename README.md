@@ -58,11 +58,16 @@ update_logs  : collector実行ログ（非公開）
 | `rss` | RSS / Atomの最新25件を取得 |
 | `youtube` | チャンネルIDを解決しYouTube公式Atom feedを取得 |
 | `official` / `label` / `blog` | HTMLタイトル・descriptionの差分を保存 |
-| `live` | HTMLから検出した日付・会場をeventsへ保存 |
+| `live` | 対象アーティストのセクションから日付・会場・都市・開場/開演・チケットURL・販売状態を抽出し、JSTでeventsへ保存 |
 | `x` / `instagram` | 自動取得せず `skipped` として記録 |
 
 同じURLかつ同じ内容ハッシュの場合は再保存しないため、毎時実行しても不要な更新を抑えます。
 イベントは `artist_id`・タイトル・開始日時の組み合わせで重複を抑えます。
+
+`live` sourceは、`YYYY/M/D`・`YYYY.MM.DD`・`YYYY-MM-DD`（日本語の年月日表記も可）を含むイベント見出しを解析します。
+ページ内にアーティスト見出しがある場合は対象アーティストのセクションだけを読み取り、別アーティストの予定を取り込みません。
+開演時刻が取得できない公演は日本時間の00:00を `starts_at` に設定し、開場時刻は取得できた場合だけ `doors_at` に保存します。
+公式ページから消えた公演は自動削除せず、`sold out`、`完売`、`中止` など明示された状態だけ更新します。
 
 ### Edge Functionの環境変数
 
@@ -75,6 +80,15 @@ COLLECT_SHARED_SECRET
 ```
 
 `SUPABASE_URL` と `SUPABASE_SERVICE_ROLE_KEY` はEdge Function環境で利用します。`COLLECT_SHARED_SECRET` は十分に長いランダム値を設定してください。
+
+CLIでの設定例:
+
+```bash
+supabase secrets set COLLECT_SHARED_SECRET=your-long-random-value
+```
+
+同じ値をGitHub ActionsのRepository Secret `COLLECT_SHARED_SECRET`にも登録してください。
+値はリポジトリやブラウザ向け設定へ保存しないでください。
 
 ### Deploy
 
@@ -116,7 +130,7 @@ Secretが未設定の場合、workflowは安全側に倒して失敗します。
 ## 次の拡張
 
 - 公式サイトのニュース一覧を個別記事単位で抽出
-- ライブページから日付・会場・開場/開演・チケットURLを `events` へ抽出
+- ライブページごとの抽出ルール改善と、より多様なイベントページ形式への対応
 - YouTube Data APIを使ったメタデータ強化
 - 管理者ログインと編集UI
 - Discord / メール等の重要更新通知

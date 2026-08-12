@@ -19,6 +19,7 @@ with artist as (
   from artist,
   (values
     ('official', 'Official Site', 'https://www.9mm.jp/index.php'),
+    ('live', 'Official Live Schedule', 'https://www.9mm.jp/live.php'),
     ('x', 'X / 9mm_official', 'https://x.com/9mm_official'),
     ('youtube', 'YouTube / 9mmCHANNEL', 'https://www.youtube.com/user/9mmCHANNEL'),
     ('label', '日本コロムビア', 'https://columbia.jp/artist-info/9mm/')
