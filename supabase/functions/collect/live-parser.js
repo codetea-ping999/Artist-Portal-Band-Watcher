@@ -177,10 +177,7 @@ function isControlLine(line) {
 
 function eventNameFromLines(lines) {
   const labelIndex = lines.findIndex((line) => EVENT_NAME_LABEL.test(normalizeText(line)));
-  if (labelIndex < 0) {
-    const fallback = lines.find((line) => !isControlLine(line) && !isFieldLine(line));
-    return fallback ? normalizeText(fallback) : "";
-  }
+  if (labelIndex < 0) return "";
 
   const label = normalizeText(lines[labelIndex]);
   const match = label.match(EVENT_NAME_LABEL);

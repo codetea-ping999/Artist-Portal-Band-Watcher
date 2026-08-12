@@ -77,4 +77,11 @@ test("handles empty and malformed pages without throwing", () => {
   assert.deepEqual(parseLiveEvents(source, ""), []);
   assert.deepEqual(parseLiveEvents(source, "<div><h3>2026/99/99 [東京]</h3><p>壊れたHTML"), []);
   assert.deepEqual(parseLiveEvents(source, "<a name=9mm>9mm Parabellum Bullet</a><div>情報不足</div>"), []);
+  assert.deepEqual(
+    parseLiveEvents(
+      source,
+      "<a name=9mm>9mm Parabellum Bullet</a><div>2026/12/31 東京ドーム [東京]</div><div>ラベルのない説明文</div>"
+    ),
+    []
+  );
 });

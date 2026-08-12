@@ -29,7 +29,7 @@ if (!main.includes('Artist Portal')) {
   throw new Error('main.js should include the app title');
 }
 
-for (const required of ['parseLiveEvents', 'persistEvents', 'source_url', 'doors_at', 'artists(name)', 'onConflict: "artist_id,title,starts_at"']) {
+for (const required of ['parseLiveEvents', 'canonicalTimestamp', 'persistEvents', 'source_url', 'doors_at', 'artists(name)', 'onConflict: "artist_id,title,starts_at"']) {
   if (!collector.includes(required)) {
     throw new Error(`collector is missing ${required}`);
   }
