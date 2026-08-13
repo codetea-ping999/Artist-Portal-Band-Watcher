@@ -12,6 +12,6 @@ test('datetime-local values round-trip through an explicit UTC instant', () => {
 });
 
 test('daysUntil compares local calendar days instead of partial 24-hour windows', () => {
-  assert.equal(daysUntil('2026-08-14T23:30:00+09:00', '2026-08-14T00:01:00+09:00'), 0);
-  assert.equal(daysUntil('2026-08-15T23:30:00+09:00', '2026-08-14T23:59:00+09:00'), 1);
+  assert.equal(daysUntil('2026-08-14T23:30:00', '2026-08-14T00:01:00'), 0);
+  assert.equal(daysUntil('2026-08-15T23:30:00', '2026-08-14T23:59:00'), 1);
 });
