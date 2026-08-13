@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Artist news</title>
+    <item>
+      <title><![CDATA[New &amp; Official Update]]></title>
+      <link>/news/one?utm_source=rss</link>
+      <guid isPermaLink="false">news-1</guid>
+      <dc:date>2026-08-13T10:00:00+09:00</dc:date>
+      <content:encoded><![CDATA[<p>Short <strong>official</strong> summary.</p>]]></content:encoded>
+    </item>
+  </channel>
+</rss>

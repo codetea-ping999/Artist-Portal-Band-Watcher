@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": "video123",
+      "snippet": {
+        "title": "API title",
+        "description": "API description",
+        "publishedAt": "2026-08-11T12:00:00Z",
+        "liveBroadcastContent": "upcoming",
+        "thumbnails": {
+          "high": { "url": "https://img.example/test.jpg" }
+        }
+      },
+      "contentDetails": { "duration": "PT3M15S" },
+      "liveStreamingDetails": { "scheduledStartTime": "2026-08-20T12:00:00Z" }
+    }
+  ]
+}

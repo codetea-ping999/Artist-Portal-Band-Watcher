@@ -66,6 +66,7 @@ create table if not exists public.posts (
 create table if not exists public.events (
   id uuid primary key default gen_random_uuid(),
   artist_id uuid not null references public.artists(id) on delete cascade,
+  source_id uuid references public.sources(id) on delete set null,
   title text not null,
   venue text,
   city text,
@@ -76,6 +77,7 @@ create table if not exists public.events (
   source_url text,
   status public.event_status not null default 'unknown',
   notes text,
+  raw_hash text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint events_title_not_blank check (length(trim(title)) > 0),

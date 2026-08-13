@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Artist Portal QA Harness</title>
+    <link rel="stylesheet" href="../../src/styles.css?qa=20260814" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">メインコンテンツへ移動</a>
+    <div id="app"></div>
+    <script type="module">
+      const { createQaRepository } = await import('./harness-repository.js');
+      window.ARTIST_PORTAL_REPOSITORY_FACTORY = createQaRepository;
+      await import('../../src/main.js');
+    </script>
+  </body>
+</html>

@@ -33,12 +33,14 @@ export function formatDate(value) {
   }).format(date);
 }
 
-export function daysUntil(value) {
+export function daysUntil(value, nowValue = new Date()) {
   if (!value) return null;
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  const now = new Date();
-  return Math.ceil((date.getTime() - now.getTime()) / 86_400_000);
+  const now = new Date(nowValue);
+  if (Number.isNaN(date.getTime()) || Number.isNaN(now.getTime())) return null;
+  const eventDay = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((eventDay - today) / 86_400_000);
 }
 
 export function sortByDateDesc(items, key) {
@@ -94,7 +96,7 @@ export function buildIcs(events, artists) {
   ];
 
   for (const event of events) {
-    if (!event.starts_at) continue;
+    if (!event.starts_at || Number.isNaN(new Date(event.starts_at).getTime())) continue;
     const artist = artistById.get(event.artist_id);
     lines.push('BEGIN:VEVENT');
     lines.push(`UID:${event.id || crypto.randomUUID()}@artist-portal-band-watcher`);

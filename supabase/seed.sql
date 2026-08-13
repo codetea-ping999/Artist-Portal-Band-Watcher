@@ -14,18 +14,21 @@ with artist as (
     description = excluded.description
   returning id
 ), source_rows as (
-  insert into public.sources (artist_id, source_type, label, url)
-  select id, source_type::public.source_type, label, url
+  insert into public.sources (artist_id, source_type, label, url, config)
+  select id, source_type::public.source_type, label, url, config::jsonb
   from artist,
   (values
-    ('official', 'Official Site', 'https://www.9mm.jp/index.php'),
-    ('x', 'X / 9mm_official', 'https://x.com/9mm_official'),
-    ('youtube', 'YouTube / 9mmCHANNEL', 'https://www.youtube.com/user/9mmCHANNEL'),
-    ('label', '日本コロムビア', 'https://columbia.jp/artist-info/9mm/')
-  ) as data(source_type, label, url)
+    ('official', 'Official Site', 'https://www.9mm.jp/index.php', '{}'),
+    ('official', 'Official News (articles)', 'https://www.9mm.jp/news.php', '{"article_anchor_prefix":"news_","article_container_id":"newscontents"}'),
+    ('live', 'Official Live Schedule', 'https://www.9mm.jp/live.php', '{}'),
+    ('x', 'X / 9mm_official', 'https://x.com/9mm_official', '{}'),
+    ('youtube', 'YouTube / 9mmCHANNEL', 'https://www.youtube.com/user/9mmCHANNEL', '{}'),
+    ('label', '日本コロムビア', 'https://columbia.jp/artist-info/9mm/', '{}')
+  ) as data(source_type, label, url, config)
   on conflict (artist_id, url) do update set
     label = excluded.label,
     source_type = excluded.source_type,
+    config = excluded.config,
     enabled = true
   returning id, artist_id, source_type, label, url
 )
@@ -34,6 +37,7 @@ select artist_id, id, source_type, title, url, summary, published_at::timestampt
 from source_rows
 join (values
   ('Official Site', '公式サイトを情報源として登録', '公式ニュース、ライブ予定、リリース情報をここから追跡します。', '2026-08-10T09:00:00+09:00'),
+  ('Official News (articles)', '公式ニュース記事を登録', 'アンカーを持つ公式ニュース一覧を個別記事として追跡します。', '2026-08-10T09:00:00+09:00'),
   ('YouTube / 9mmCHANNEL', 'YouTubeチャンネルを登録', 'MV、ライブ配信、公式番組の更新を一覧化する対象です。', '2026-08-09T19:30:00+09:00'),
   ('日本コロムビア', 'レーベル公式ページを登録', 'リリース、メディア掲載、配信情報を確認する対象です。', '2026-08-08T12:00:00+09:00')
 ) as post_seed(label, title, summary, published_at) using (label)

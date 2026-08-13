@@ -33,10 +33,22 @@ jobs:
             --data '{}' \
             "$COLLECT_URL")"
 
-          cat "$response_file"
-          echo
-
           if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
             echo "Collector returned HTTP $status"
+            exit 1
+          fi
+
+          if ! node -e '
+            const fs = require("fs");
+            const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const errors = (body.results || []).filter((result) => result.status === "error");
+            const ok = (body.results || []).filter((result) => result.status === "ok").length;
+            const skipped = (body.results || []).filter((result) => result.status === "skipped").length;
+            console.log(`Collector summary: ${ok} ok, ${skipped} skipped, ${errors.length} error`);
+            if (errors.length) {
+              console.error(`${errors.length} collector source(s) failed: ${errors.map((result) => result.source).join(", ")}`);
+              process.exit(1);
+            }
+          ' "$response_file"; then
             exit 1
           fi

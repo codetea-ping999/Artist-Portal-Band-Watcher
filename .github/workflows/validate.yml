@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,3 +22,5 @@ jobs:
           node-version: '22'
       - name: Validate files
         run: npm run validate
+      - name: Test collector parser
+        run: npm test
