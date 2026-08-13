@@ -1,6 +1,14 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2.111.0";
-import { parseLiveEvents } from "./live-parser.js";
+import { DiscordDeliveryError, postDiscordUpdate } from "./discord-notifier.js";
+import {
+  MAX_NOTIFICATION_ATTEMPTS,
+  MAX_NOTIFICATION_SENDS_PER_RUN,
+  createNotificationBudget,
+  resolveRetryCandidates
+} from "./notification-retry.js";
+import { eventIdentity, planEventChanges, planPostChanges } from "./dedupe.js";
+import { collectSource } from "./source-collector.js";
 
 type Source = {
   id: string;
@@ -9,6 +17,7 @@ type Source = {
   source_type: string;
   label: string;
   url: string;
+  config?: Record<string, unknown> | null;
 };
 
 type SourceRow = Omit<Source, "artist_name"> & {
@@ -23,7 +32,8 @@ type CollectedPost = {
   url: string;
   summary: string;
   external_id: string;
-  published_at: string;
+  published_at: string | null;
+  metadata?: Record<string, unknown>;
   raw_hash: string;
 };
 
@@ -42,16 +52,11 @@ type CollectedEvent = {
   raw_hash: string;
 };
 
-type CollectionResult = {
-  posts: CollectedPost[];
-  events: CollectedEvent[];
-  skipped?: boolean;
-  reason?: string;
-};
-
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const sharedSecret = Deno.env.get("COLLECT_SHARED_SECRET") ?? "";
+const youtubeApiKey = Deno.env.get("YOUTUBE_API_KEY") ?? "";
+const discordWebhookUrl = Deno.env.get("DISCORD_WEBHOOK_URL") ?? "";
 const userAgent = "ArtistPortalBandWatcher/0.2 (+https://github.com/codetea-ping999/Artist-Portal-Band-Watcher)";
 
 function json(body: unknown, status = 200) {
@@ -59,137 +64,6 @@ function json(body: unknown, status = 200) {
     status,
     headers: { "content-type": "application/json; charset=utf-8" }
   });
-}
-
-function hashText(value: string) {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (Math.imul(31, hash) + value.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash).toString(16);
-}
-
-function decodeEntities(value: string) {
-  return value
-    .replaceAll("&amp;", "&")
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&#39;", "'")
-    .replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
-    .trim();
-}
-
-function stripHtml(value: string) {
-  return decodeEntities(
-    value
-      .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-  );
-}
-
-function getTag(block: string, tag: string) {
-  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = block.match(new RegExp(`<${escaped}[^>]*>([\\s\\S]*?)<\\/${escaped}>`, "i"));
-  return match ? decodeEntities(match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")) : "";
-}
-
-function getAttribute(block: string, tag: string, attribute: string) {
-  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedAttribute = attribute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = block.match(
-    new RegExp(`<${escapedTag}\\b[^>]*\\b${escapedAttribute}=["']([^"']+)["'][^>]*>`, "i")
-  );
-  return match ? decodeEntities(match[1]) : "";
-}
-
-function absolutize(base: string, maybeUrl: string) {
-  try {
-    return new URL(maybeUrl, base).toString();
-  } catch {
-    return base;
-  }
-}
-
-function isoDate(value: string | undefined, fallback = new Date().toISOString()) {
-  if (!value) return fallback;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString();
-}
-
-function canonicalTimestamp(value: string | null | undefined) {
-  if (!value) return "";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
-}
-
-function feedPost(source: Source, block: string, kind: "rss" | "atom"): CollectedPost {
-  const title = stripHtml(getTag(block, "title") || source.label);
-  const atomLink = getAttribute(block, "link", "href");
-  const link = absolutize(source.url, getTag(block, "link") || atomLink || source.url);
-  const summary = stripHtml(
-    getTag(block, "description") ||
-      getTag(block, "content:encoded") ||
-      getTag(block, "media:description") ||
-      getTag(block, "summary") ||
-      getTag(block, "content") ||
-      ""
-  ).slice(0, 320);
-  const published =
-    getTag(block, "pubDate") ||
-    getTag(block, "published") ||
-    getTag(block, "updated") ||
-    new Date().toISOString();
-  const externalId =
-    getTag(block, "guid") || getTag(block, "id") || getTag(block, "yt:videoId") || link;
-
-  return {
-    artist_id: source.artist_id,
-    source_id: source.id,
-    source_type: source.source_type,
-    title,
-    url: link,
-    summary,
-    external_id: externalId,
-    published_at: isoDate(published),
-    raw_hash: hashText(`${kind}:${externalId}:${title}:${summary}:${published}`)
-  };
-}
-
-function parseFeed(source: Source, body: string) {
-  const rssItems = [...body.matchAll(/<item\b[\s\S]*?<\/item>/gi)].map((match) => match[0]);
-  if (rssItems.length) {
-    return rssItems.slice(0, 25).map((block) => feedPost(source, block, "rss"));
-  }
-
-  const atomEntries = [...body.matchAll(/<entry\b[\s\S]*?<\/entry>/gi)].map((match) => match[0]);
-  return atomEntries.slice(0, 25).map((block) => feedPost(source, block, "atom"));
-}
-function parseHtmlSnapshot(source: Source, body: string): CollectedPost[] {
-  const title = stripHtml(body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? source.label);
-  const descriptionMatch =
-    body.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i) ??
-    body.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i) ??
-    body.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i);
-  const description = stripHtml(descriptionMatch?.[1] ?? "公式ページの更新を確認しました。");
-  const snapshotHash = hashText(`${title}:${description}`);
-
-  return [
-    {
-      artist_id: source.artist_id,
-      source_id: source.id,
-      source_type: source.source_type,
-      title,
-      url: source.url,
-      summary: description.slice(0, 320),
-      external_id: source.url,
-      published_at: new Date().toISOString(),
-      raw_hash: snapshotHash
-    }
-  ];
 }
 
 async function fetchText(url: string) {
@@ -208,86 +82,64 @@ async function fetchText(url: string) {
   return await response.text();
 }
 
-function extractYouTubeChannelId(body: string) {
-  const patterns = [
-    /"channelId":"(UC[a-zA-Z0-9_-]{20,})"/,
-    /"browseId":"(UC[a-zA-Z0-9_-]{20,})"/,
-    /itemprop=["']channelId["'][^>]+content=["'](UC[a-zA-Z0-9_-]{20,})["']/i,
-    /content=["'](UC[a-zA-Z0-9_-]{20,})["'][^>]+itemprop=["']channelId["']/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = body.match(pattern);
-    if (match?.[1]) return match[1];
-  }
-  return "";
-}
-
-async function collectYouTube(source: Source) {
-  if (source.url.includes("youtube.com/feeds/videos.xml")) {
-    return parseFeed(source, await fetchText(source.url));
-  }
-
-  const channelPage = await fetchText(source.url);
-  const channelId = extractYouTubeChannelId(channelPage);
-  if (!channelId) {
-    throw new Error(`YouTube channel ID could not be resolved from ${source.url}`);
-  }
-
-  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(channelId)}`;
-  return parseFeed(source, await fetchText(feedUrl));
-}
-
-async function collectSource(source: Source): Promise<CollectionResult> {
-  if (source.source_type === "x" || source.source_type === "instagram") {
-    return { skipped: true, reason: `${source.source_type} scraping is intentionally disabled`, posts: [], events: [] };
-  }
-
-  if (source.source_type === "youtube") {
-    const posts = await collectYouTube(source);
-    return { skipped: false, posts, events: [] };
-  }
-
-  const body = await fetchText(source.url);
-  const looksLikeFeed = source.source_type === "rss" || /<(rss|feed)\b/i.test(body.slice(0, 1200));
-
-  if (source.source_type === "live") {
-    const events = parseLiveEvents(source, body);
-    return { skipped: false, posts: [], events };
-  }
-
-  return {
-    skipped: false,
-    posts: looksLikeFeed ? parseFeed(source, body) : parseHtmlSnapshot(source, body),
-    events: []
-  };
-}
-
 async function persistPosts(
   supabase: SupabaseClient<any>,
   source: Source,
   posts: CollectedPost[]
 ) {
-  if (posts.length === 0) return { changed: 0, unchanged: 0 };
+  if (posts.length === 0) return { changed: 0, unchanged: 0, duplicates: 0, notifications: [] as NotificationCandidate[] };
   const { data: existing, error: existingError } = await supabase
     .from("posts")
-    .select("url, raw_hash")
-    .eq("source_id", source.id);
+    .select("id, source_id, url, external_id, raw_hash")
+    .eq("artist_id", source.artist_id);
 
   if (existingError) throw existingError;
 
-  const hashes = new Map((existing ?? []).map((row) => [row.url, row.raw_hash]));
-  const changed = posts.filter((post) => hashes.get(post.url) !== post.raw_hash);
-  const unchanged = posts.length - changed.length;
+  const plan = planPostChanges(posts, existing ?? []);
+  const changed = plan.changed;
 
+  let records: Array<Record<string, any>> = [];
   if (changed.length) {
-    const { error: upsertError } = await supabase
-      .from("posts")
-      .upsert(changed, { onConflict: "artist_id,url" });
-    if (upsertError) throw upsertError;
+    const updates = changed.filter((post) => post._existingId);
+    const inserts = changed.filter((post) => !post._existingId);
+    if (updates.length) {
+      const { data, error } = await supabase
+        .from("posts")
+        .upsert(updates.map(({ _existingId, _isNew, ...post }) => ({ id: _existingId, ...post })), { onConflict: "id" })
+        .select("id, artist_id, title, url, raw_hash");
+      if (error) throw error;
+      records.push(...(data ?? []));
+    }
+    if (inserts.length) {
+      const { data, error } = await supabase
+        .from("posts")
+        .upsert(inserts.map(({ _existingId, _isNew, ...post }) => post), { onConflict: "artist_id,url" })
+        .select("id, artist_id, title, url, raw_hash");
+      if (error) throw error;
+      records.push(...(data ?? []));
+    }
   }
 
-  return { changed: changed.length, unchanged };
+  const idByUrl = new Map(records.map((row) => [row.url, row.id]));
+  return {
+    changed: changed.length,
+    unchanged: plan.unchanged,
+    duplicates: plan.duplicates,
+    notifications: changed
+      .filter((post) => post._isNew)
+      .flatMap((post) => {
+        const entityId = idByUrl.get(post.url);
+        return entityId ? [{
+          entity_type: "post" as const,
+          event_type: "post_created" as const,
+          entity_id: entityId,
+          artist_id: post.artist_id,
+          title: post.title,
+          url: post.url,
+          change_hash: post.raw_hash
+        }] : [];
+      })
+  };
 }
 
 async function persistEvents(
@@ -295,30 +147,253 @@ async function persistEvents(
   source: Source,
   events: CollectedEvent[]
 ) {
-  if (events.length === 0) return { changed: 0, unchanged: 0 };
+  if (events.length === 0) return { changed: 0, unchanged: 0, duplicates: 0, notifications: [] as NotificationCandidate[] };
   const { data: existing, error: existingError } = await supabase
     .from("events")
-    .select("source_url, title, starts_at, raw_hash")
-    .eq("source_id", source.id);
+    .select("id, artist_id, source_url, title, starts_at, raw_hash")
+    .eq("artist_id", source.artist_id);
 
   if (existingError) throw existingError;
 
-  const eventKey = (event: { title: string; starts_at: string | null; source_url: string }) =>
-    `${event.title}:${canonicalTimestamp(event.starts_at)}:${event.source_url}`;
-  const hashes = new Map(
-    (existing ?? []).map((row) => [eventKey(row), row.raw_hash])
-  );
-  const changed = events.filter((event) => hashes.get(eventKey(event)) !== event.raw_hash);
-  const unchanged = events.length - changed.length;
+  const plan = planEventChanges(events, existing ?? []);
+  const changed = plan.changed;
 
+  let records: Array<Record<string, any>> = [];
   if (changed.length) {
-    const { error: upsertError } = await supabase
-      .from("events")
-      .upsert(changed, { onConflict: "artist_id,title,starts_at" });
-    if (upsertError) throw upsertError;
+    const updates = changed.filter((event) => event._existingId);
+    const inserts = changed.filter((event) => !event._existingId);
+    if (updates.length) {
+      const { data, error } = await supabase
+        .from("events")
+        .upsert(updates.map(({ _existingId, _isNew, ...event }) => ({ id: _existingId, ...event })), { onConflict: "id" })
+        .select("id, artist_id, title, starts_at, ticket_url, source_url, raw_hash");
+      if (error) throw error;
+      records.push(...(data ?? []));
+    }
+    if (inserts.length) {
+      const { data, error } = await supabase
+        .from("events")
+        .upsert(inserts.map(({ _existingId, _isNew, ...event }) => event), { onConflict: "artist_id,title,starts_at" })
+        .select("id, artist_id, title, starts_at, ticket_url, source_url, raw_hash");
+      if (error) throw error;
+      records.push(...(data ?? []));
+    }
   }
 
-  return { changed: changed.length, unchanged };
+  const idByIdentity = new Map(records.map((row) => [eventIdentity(row), row.id]));
+  return {
+    changed: changed.length,
+    unchanged: plan.unchanged,
+    duplicates: plan.duplicates,
+    notifications: changed
+      .flatMap((event) => {
+        const entityId = event._existingId ?? idByIdentity.get(eventIdentity(event));
+        return entityId ? [{
+          entity_type: "event" as const,
+          event_type: (event._isNew ? "event_created" : "event_changed") as const,
+          entity_id: entityId,
+          artist_id: event.artist_id,
+          title: event.title,
+          url: event.ticket_url ?? event.source_url,
+          change_hash: event.raw_hash
+        }] : [];
+      })
+  };
+}
+
+type NotificationCandidate = {
+  entity_type: "post" | "event";
+  event_type: "post_created" | "event_created" | "event_changed";
+  entity_id: string;
+  artist_id: string;
+  title: string;
+  url: string;
+  change_hash: string;
+};
+
+type NotificationBudget = { remaining: number };
+
+async function attemptDiscordDelivery(
+  supabase: SupabaseClient<any>,
+  delivery: Record<string, any>,
+  candidate: NotificationCandidate,
+  budget: NotificationBudget
+) {
+  if (budget.remaining <= 0) return "deferred" as const;
+  const { data: claimed, error: claimError } = await supabase
+    .rpc("claim_notification_delivery", { target_delivery_id: delivery.id })
+    .maybeSingle();
+  if (claimError) {
+    console.error("Notification claim failed", claimError.message);
+    return "failed" as const;
+  }
+  if (!claimed) return "skipped" as const;
+
+  budget.remaining -= 1;
+  try {
+    await postDiscordUpdate(discordWebhookUrl, candidate);
+  } catch (error) {
+    const retryable = error instanceof DiscordDeliveryError && error.retryable;
+    const detail = error instanceof Error ? error.message : String(error);
+    await supabase.from("notification_deliveries").update({
+      status: "failed",
+      attempts: retryable ? claimed.attempts : MAX_NOTIFICATION_ATTEMPTS,
+      claimed_at: null,
+      last_error: `${retryable ? "Provider rejected delivery" : "Delivery result is ambiguous; automatic retry disabled"}: ${detail}`.slice(0, 500)
+    }).eq("id", delivery.id).eq("status", "processing");
+    return "failed" as const;
+  }
+
+  // Do not turn a successful provider call into a retry when only the local
+  // acknowledgement fails: that would post the same Discord message twice.
+  const { data: acknowledged, error: acknowledgeError } = await supabase
+    .from("notification_deliveries")
+    .update({
+      status: "sent",
+      last_error: null,
+      sent_at: new Date().toISOString(),
+      claimed_at: null
+    })
+    .eq("id", delivery.id)
+    .eq("status", "processing")
+    .select("id")
+    .maybeSingle();
+  if (acknowledgeError || !acknowledged) {
+    console.error("Notification was sent but acknowledgement failed", acknowledgeError?.message ?? "row was not processing");
+    return "sent_unconfirmed" as const;
+  }
+  return "sent" as const;
+}
+
+async function notifyDiscord(
+  supabase: SupabaseClient<any>,
+  candidates: NotificationCandidate[],
+  budget: NotificationBudget
+) {
+  if (!discordWebhookUrl || candidates.length === 0) {
+    return { sent: 0, sent_unconfirmed: 0, failed: 0, deferred: 0, skipped: candidates.length };
+  }
+
+  let sent = 0;
+  let sentUnconfirmed = 0;
+  let failed = 0;
+  let deferred = 0;
+  let skipped = 0;
+  for (const candidate of candidates) {
+    const { data: rules, error: ruleError } = await supabase
+      .from("notification_rules")
+      .select("id, destination_key")
+      .eq("enabled", true)
+      .eq("event_type", candidate.event_type)
+      .or(`artist_id.eq.${candidate.artist_id},artist_id.is.null`);
+    if (ruleError) {
+      failed += 1;
+      continue;
+    }
+
+    for (const rule of rules ?? []) {
+      // This first provider intentionally supports only the server-side default
+      // Discord destination. Never store webhook URLs in browser-readable rows.
+      if (rule.destination_key !== "default") continue;
+      const { data: existing, error: deliveryReadError } = await supabase
+        .from("notification_deliveries")
+        .select("id, status, attempts")
+        .eq("rule_id", rule.id)
+        .eq("entity_type", candidate.entity_type)
+        .eq("entity_id", candidate.entity_id)
+        .eq("change_hash", candidate.change_hash)
+        .maybeSingle();
+      if (deliveryReadError || existing?.status === "sent") continue;
+      if (existing?.status === "failed" && existing.attempts >= MAX_NOTIFICATION_ATTEMPTS) continue;
+
+      let delivery = existing;
+      if (!delivery) {
+        const { data, error } = await supabase
+          .from("notification_deliveries")
+          .insert({
+            rule_id: rule.id,
+            entity_type: candidate.entity_type,
+            entity_id: candidate.entity_id,
+            change_hash: candidate.change_hash,
+            status: "pending"
+          })
+          .select("id, status, attempts")
+          .single();
+        if (error) continue;
+        delivery = data;
+      }
+
+      const outcome = await attemptDiscordDelivery(supabase, delivery, candidate, budget);
+      if (outcome === "sent") sent += 1;
+      if (outcome === "sent_unconfirmed") sentUnconfirmed += 1;
+      if (outcome === "failed") failed += 1;
+      if (outcome === "deferred") deferred += 1;
+      if (outcome === "skipped") skipped += 1;
+    }
+  }
+  return { sent, sent_unconfirmed: sentUnconfirmed, failed, deferred, skipped };
+}
+
+async function retryDiscordDeliveries(supabase: SupabaseClient<any>, budget: NotificationBudget) {
+  if (!discordWebhookUrl || budget.remaining <= 0) {
+    return { sent: 0, sent_unconfirmed: 0, failed: 0, deferred: 0, skipped: 0, stale: 0 };
+  }
+
+  const { data: deliveries, error: deliveryError } = await supabase
+    .from("notification_deliveries")
+    .select("id, rule_id, entity_type, entity_id, change_hash, status, attempts")
+    .in("status", ["pending", "failed"])
+    .lt("attempts", MAX_NOTIFICATION_ATTEMPTS)
+    .order("created_at", { ascending: true })
+    .limit(MAX_NOTIFICATION_SENDS_PER_RUN);
+  if (deliveryError) throw deliveryError;
+  if (!deliveries?.length) return { sent: 0, sent_unconfirmed: 0, failed: 0, deferred: 0, skipped: 0, stale: 0 };
+
+  const ruleIds = [...new Set(deliveries.map((delivery) => delivery.rule_id))];
+  const postIds = [...new Set(deliveries.filter((delivery) => delivery.entity_type === "post").map((delivery) => delivery.entity_id))];
+  const eventIds = [...new Set(deliveries.filter((delivery) => delivery.entity_type === "event").map((delivery) => delivery.entity_id))];
+  const [rulesResult, postsResult, eventsResult] = await Promise.all([
+    supabase.from("notification_rules").select("id, artist_id, event_type, destination_key, enabled").in("id", ruleIds),
+    postIds.length
+      ? supabase.from("posts").select("id, artist_id, title, url, raw_hash").in("id", postIds)
+      : Promise.resolve({ data: [], error: null }),
+    eventIds.length
+      ? supabase.from("events").select("id, artist_id, title, ticket_url, source_url, raw_hash").in("id", eventIds)
+      : Promise.resolve({ data: [], error: null })
+  ]);
+  if (rulesResult.error) throw rulesResult.error;
+  if (postsResult.error) throw postsResult.error;
+  if (eventsResult.error) throw eventsResult.error;
+
+  const resolved = resolveRetryCandidates({
+    deliveries,
+    rules: rulesResult.data ?? [],
+    posts: postsResult.data ?? [],
+    events: eventsResult.data ?? []
+  });
+  for (const stale of resolved.stale) {
+    await supabase.from("notification_deliveries").update({
+      status: "failed",
+      attempts: MAX_NOTIFICATION_ATTEMPTS,
+      claimed_at: null,
+      last_error: "Notification superseded or its source entity is no longer available."
+    }).eq("id", stale.id);
+  }
+
+  let sent = 0;
+  let sentUnconfirmed = 0;
+  let failed = 0;
+  let deferred = 0;
+  let skipped = 0;
+  for (const { delivery, candidate } of resolved.ready) {
+    const outcome = await attemptDiscordDelivery(supabase, delivery, candidate, budget);
+    if (outcome === "sent") sent += 1;
+    if (outcome === "sent_unconfirmed") sentUnconfirmed += 1;
+    if (outcome === "failed") failed += 1;
+    if (outcome === "deferred") deferred += 1;
+    if (outcome === "skipped") skipped += 1;
+  }
+  return { sent, sent_unconfirmed: sentUnconfirmed, failed, deferred, skipped, stale: resolved.stale.length };
 }
 
 Deno.serve(async (req) => {
@@ -342,9 +417,19 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false }
   });
 
+  const notificationBudget = createNotificationBudget();
+  let retriedNotifications = { sent: 0, sent_unconfirmed: 0, failed: 0, deferred: 0, skipped: 0, stale: 0 };
+  try {
+    retriedNotifications = await retryDiscordDeliveries(supabase, notificationBudget);
+  } catch (error) {
+    // Notification availability must never prevent collection of other sources.
+    retriedNotifications = { sent: 0, sent_unconfirmed: 0, failed: 1, deferred: 0, skipped: 0, stale: 0 };
+    console.error("Notification retry preparation failed", error instanceof Error ? error.message : String(error));
+  }
+
   const { data: sourceRows, error } = await supabase
     .from("sources")
-    .select("id, artist_id, source_type, label, url, artists(name)")
+    .select("id, artist_id, source_type, label, url, config, artists(name)")
     .eq("enabled", true)
     .order("source_type")
     .order("label");
@@ -360,7 +445,7 @@ Deno.serve(async (req) => {
   for (const source of sources as Source[]) {
     const checkedAt = new Date().toISOString();
     try {
-      const collected = await collectSource(source);
+      const collected = await collectSource(source, { fetchText, youtubeApiKey });
       if (collected.skipped) {
         await supabase.from("sources").update({ last_checked_at: checkedAt }).eq("id", source.id);
         await supabase.from("update_logs").insert({
@@ -374,19 +459,33 @@ Deno.serve(async (req) => {
 
       const persistedPosts = await persistPosts(supabase, source, collected.posts);
       const persistedEvents = await persistEvents(supabase, source, collected.events);
+      const notifications = await notifyDiscord(supabase, [
+        ...persistedPosts.notifications,
+        ...persistedEvents.notifications
+      ], notificationBudget);
       await supabase.from("sources").update({ last_checked_at: checkedAt }).eq("id", source.id);
       await supabase.from("update_logs").insert({
         source_id: source.id,
         status: "ok",
-        message: `posts: ${persistedPosts.changed} changed, ${persistedPosts.unchanged} unchanged; events: ${persistedEvents.changed} changed, ${persistedEvents.unchanged} unchanged`
+        message: `posts: ${persistedPosts.changed} changed, ${persistedPosts.unchanged} unchanged, ${persistedPosts.duplicates} duplicate inputs; events: ${persistedEvents.changed} changed, ${persistedEvents.unchanged} unchanged, ${persistedEvents.duplicates} duplicate inputs; notifications: ${notifications.sent} sent, ${notifications.sent_unconfirmed} unconfirmed, ${notifications.failed} failed, ${notifications.deferred} deferred${collected.diagnostic ? `; diagnostic: ${collected.diagnostic}` : ""}`
       });
       results.push({
         source: source.label,
         status: "ok",
         fetched_posts: collected.posts.length,
         fetched_events: collected.events.length,
-        posts: persistedPosts,
-        events: persistedEvents
+        posts: {
+          changed: persistedPosts.changed,
+          unchanged: persistedPosts.unchanged,
+          duplicates: persistedPosts.duplicates
+        },
+        events: {
+          changed: persistedEvents.changed,
+          unchanged: persistedEvents.unchanged,
+          duplicates: persistedEvents.duplicates
+        },
+        notifications,
+        diagnostic: collected.diagnostic ?? null
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -395,5 +494,11 @@ Deno.serve(async (req) => {
     }
   }
 
-  return json({ ok: true, checked_at: new Date().toISOString(), results });
+  return json({
+    ok: true,
+    checked_at: new Date().toISOString(),
+    notification_retries: retriedNotifications,
+    notification_budget_remaining: notificationBudget.remaining,
+    results
+  });
 });

@@ -1,10 +1,10 @@
-const DATE_LINE_PATTERN = /^[ \t]*(?<year>\d{4})[ \t]*(?:[./-][ \t]*|年[ \t]*)(?<month>\d{1,2})[ \t]*(?:[./-][ \t]*|月[ \t]*)(?<day>\d{1,2})[ \t]*日?[ \t]*(?:[（(][^）)]*[）)])?[ \t]*(?<header>.*)$/gm;
+const DATE_LINE_PATTERN = /^[ \t]*(?:(?<year>\d{4})[ \t]*(?:[./-][ \t]*|年[ \t]*))?(?<month>\d{1,2})[ \t]*(?:[./-][ \t]*|月[ \t]*)(?<day>\d{1,2})(?:[ \t]*日?(?:[〜～~\-][ \t]*(?<endDay>\d{1,2})日?)?)?[ \t]*(?:[（(][^）)]*[）)])?[ \t]*(?<header>.*)$/gm;
 const DATE_LINE_CAPTURE_PATTERN = new RegExp(DATE_LINE_PATTERN.source, "mu");
 const URL_PATTERN = /https?:\/\/[^\s<>"'）)\]}]+/gi;
 const URL_TEST_PATTERN = /https?:\/\//i;
 const SECTION_MARKER_PATTERN = /<(h[1-6]|a)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
 
-const EVENT_NAME_LABEL = /^(?:[【〖\[]\s*)?(?:イベント名|公演名|event\s*name|title)(?:[】〗\]]\s*)?(?:[:：]\s*)?(.*)$/iu;
+const EVENT_NAME_LABEL = /^(?:[【〖\[]\s*)?(?:イベント名|公演名|イベントタイトル|公演タイトル|event\s*name|title)(?:[】〗\]]\s*)?(?:[:：]\s*)?(.*)$/iu;
 const FIELD_LABEL = /^(?:[【〖\[]\s*)?(?:イベント名|公演名|event\s*name|title|時間|日時|time|開場|開演|open|start|チケット|ticket|料金|出演|出演者|問い合わせ|お問合せ|問合せ|contact)(?:[】〗\]]\s*)?(?:[:：].*)?$/iu;
 const STATUS_ONLY = /^(?:[【〖\[<＜]\s*)?(?:sold\s*out|soldout|完売|中止|公演中止|キャンセル(?:led)?)(?:\s*[】〗\]>＞])?$/iu;
 const CONTROL_LINE = /^(?:詳しくは|受付(?:URL)?|URL|先行抽選|一般発売|一般販売|オフィシャル先行|チケット受付|https?:\/\/|[〈《].*[〉》])/iu;
@@ -95,10 +95,14 @@ function selectArtistSection(html, artistName) {
     return body.slice(start, end);
   }
 
-  // If the page explicitly has artist sections but the requested artist is absent,
-  // do not accidentally import another artist's schedule.
-  const hasOtherSection = markers.some((marker) => marker.comparable === "others" || marker.comparable.includes("その他"));
-  return hasOtherSection ? "" : body;
+  // If two or more non-date headings each own a dated schedule, this is a
+  // multi-artist page. An absent target must not fall back to the whole body,
+  // even when the publisher did not label the final section "Other".
+  const datedSections = markers.filter((marker, index) => {
+    const end = markers[index + 1]?.start ?? body.length;
+    return DATE_LINE_CAPTURE_PATTERN.test(htmlToText(body.slice(marker.end, end)));
+  });
+  return datedSections.length >= 2 ? "" : body;
 }
 
 function parseDate(year, month, day) {
@@ -122,8 +126,48 @@ function parseDate(year, month, day) {
   return { year: numericYear, month: numericMonth, day: numericDay };
 }
 
-function jstIso(date, time = { hour: 0, minute: 0 }) {
-  return new Date(Date.UTC(date.year, date.month - 1, date.day, time.hour - 9, time.minute)).toISOString();
+function defaultYear(source) {
+  const configured = Number(source?.config?.default_year ?? source?.collector_config?.default_year);
+  if (Number.isInteger(configured) && configured >= 2000 && configured <= 2100) return configured;
+  return new Date().getUTCFullYear();
+}
+
+function parseDates(year, month, day, endDay, source) {
+  const resolvedYear = year ? Number(year) : defaultYear(source);
+  const first = parseDate(resolvedYear, month, day);
+  if (!first) return [];
+  const lastDay = endDay ? Number(endDay) : first.day;
+  if (!Number.isInteger(lastDay) || lastDay < first.day || lastDay > 31) return [];
+  const dates = [];
+  for (let candidate = first.day; candidate <= lastDay; candidate += 1) {
+    const date = parseDate(first.year, first.month, candidate);
+    if (!date) return [];
+    dates.push(date);
+  }
+  return dates;
+}
+
+function timezoneOffsetMinutes(source, text) {
+  const value = normalizeText(text);
+  if (/\bJST\b/iu.test(value)) return 9 * 60;
+  const utcOffset = value.match(/\bUTC\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\b/iu);
+  if (utcOffset) {
+    const minutes = (Number(utcOffset[2]) * 60) + Number(utcOffset[3] ?? 0);
+    return utcOffset[1] === '-' ? -minutes : minutes;
+  }
+  if (/\bUTC\b/iu.test(value)) return 0;
+  const numericOffset = value.match(/(?:^|\s)([+-])(\d{2}):?(\d{2})(?:\s|$)/u);
+  if (numericOffset) {
+    const minutes = (Number(numericOffset[2]) * 60) + Number(numericOffset[3]);
+    return numericOffset[1] === '-' ? -minutes : minutes;
+  }
+  const configured = Number(source?.config?.timezone_offset_minutes ?? source?.collector_config?.timezone_offset_minutes);
+  if (Number.isInteger(configured) && configured >= -720 && configured <= 840) return configured;
+  return 9 * 60;
+}
+
+function zonedIso(date, time = { hour: 0, minute: 0 }, offsetMinutes = 9 * 60) {
+  return new Date(Date.UTC(date.year, date.month - 1, date.day, time.hour, time.minute) - (offsetMinutes * 60_000)).toISOString();
 }
 
 function parseTime(text, labels) {
@@ -153,6 +197,10 @@ function parseVenue(header) {
   }
 
   return { venue: value, city: "" };
+}
+
+function isStreamingText(value) {
+  return /(?:配信|online|stream(?:ing)?|youtube|twitch|zoom)/iu.test(normalizeText(value));
 }
 
 function cleanUrl(value) {
@@ -211,7 +259,8 @@ function rawEventHash(event) {
     event.doors_at ?? "",
     event.ticket_url ?? "",
     event.status,
-    event.source_url
+    event.source_url,
+    event.notes ?? ""
   ].join("\u001f");
 
   let hash = 0;
@@ -225,39 +274,44 @@ function parseEventSegment(segment, source) {
   const match = segment.match(DATE_LINE_CAPTURE_PATTERN);
   if (!match?.groups) return null;
 
-  const date = parseDate(match.groups.year, match.groups.month, match.groups.day);
-  if (!date) return null;
+  const dates = parseDates(match.groups.year, match.groups.month, match.groups.day, match.groups.endDay, source);
+  if (!dates.length) return [];
 
   const header = normalizeText(match.groups.header);
   const location = parseVenue(header);
-  if (!location.venue) return null;
 
   const remaining = segment.slice(match[0].length);
   const lines = remaining.split("\n").map(normalizeText).filter(Boolean);
   const title = eventNameFromLines(lines);
-  if (!title) return null;
+  if (!title) return [];
+  const streaming = isStreamingText(`${header}\n${remaining}\n${title}`);
+  if (!location.venue && !streaming) return [];
 
   const doorsTime = parseTime(remaining, ["開場", "open"]);
   const startTime = parseTime(remaining, ["開演", "start"]);
+  const offsetMinutes = timezoneOffsetMinutes(source, `${header}\n${remaining}`);
   const ticketUrls = extractUrls(remaining).filter((url) => url !== cleanUrl(source.url));
   const ticketUrl = ticketUrls[0] ?? null;
-  const startsAt = jstIso(date, startTime ?? { hour: 0, minute: 0 });
-  const doorsAt = doorsTime ? jstIso(date, doorsTime) : null;
-  const event = {
-    artist_id: source.artist_id,
-    source_id: source.id,
-    title,
-    venue: location.venue,
-    city: location.city,
-    starts_at: startsAt,
-    doors_at: doorsAt,
-    ticket_url: ticketUrl,
-    status: eventStatus(remaining),
-    source_url: source.url,
-    raw_hash: ""
-  };
-  event.raw_hash = rawEventHash(event);
-  return event;
+  return dates.map((date) => {
+    const startsAt = zonedIso(date, startTime ?? { hour: 0, minute: 0 }, offsetMinutes);
+    const doorsAt = doorsTime ? zonedIso(date, doorsTime, offsetMinutes) : null;
+    const event = {
+      artist_id: source.artist_id,
+      source_id: source.id,
+      title,
+      venue: streaming && (!location.venue || /^(?:online|配信)$/iu.test(location.venue)) ? "Online / 配信" : location.venue,
+      city: location.city,
+      starts_at: startsAt,
+      doors_at: doorsAt,
+      ticket_url: ticketUrl,
+      status: eventStatus(remaining),
+      source_url: source.url,
+      notes: ticketUrls.length > 1 ? `チケット・視聴URL: ${ticketUrls.join(" ")}` : undefined,
+      raw_hash: ""
+    };
+    event.raw_hash = rawEventHash(event);
+    return event;
+  });
 }
 
 export function parseLiveEvents(source, html) {
@@ -272,8 +326,8 @@ export function parseLiveEvents(source, html) {
     const current = matches[index];
     const start = current.index ?? 0;
     const end = matches[index + 1]?.index ?? text.length;
-    const event = parseEventSegment(text.slice(start, end), source);
-    if (event) events.push(event);
+    const eventsInSegment = parseEventSegment(text.slice(start, end), source);
+    events.push(...eventsInSegment);
   }
 
   const seen = new Set();
@@ -291,5 +345,7 @@ export const __test__ = {
   parseDate,
   parseTime,
   parseVenue,
-  eventStatus
+  eventStatus,
+  timezoneOffsetMinutes,
+  zonedIso
 };

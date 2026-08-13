@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "python3 -m http.server 3000",
     "validate": "node scripts/validate-static-app.mjs",
-    "test": "node --test tests/collector/live-parser.test.mjs"
+    "test": "node --test tests/collector/*.test.mjs"
   },
   "keywords": [
     "artist",

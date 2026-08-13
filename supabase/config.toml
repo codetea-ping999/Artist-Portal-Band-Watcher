@@ -1,6 +1,7 @@
 # Supabase CLI configuration for Artist Portal Band Watcher.
 #
-# Fill in `project_id` after creating the remote project, then run:
+# The connected remote project. After cloning into another environment, replace
+# this value with that project's reference before using the Supabase CLI.
 #   supabase db push
 #   supabase db seed
 #   supabase functions deploy collect --no-verify-jwt
@@ -8,8 +9,7 @@
 # This file intentionally keeps the initial setup lightweight so the
 # repository can document the target state before the remote project exists.
 
-project_id = "YOUR_PROJECT_REF"
+project_id = "gvrzchxbnnxgaysadqdd"
 
 [functions.collect]
 verify_jwt = false
-

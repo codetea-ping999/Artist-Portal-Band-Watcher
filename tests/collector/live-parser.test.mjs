@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { parseLiveEvents } from "../../supabase/functions/collect/live-parser.js";
 
 const fixture = await readFile(new URL("../fixtures/live-page.html", import.meta.url), "utf8");
+const streamingFixture = await readFile(new URL("../fixtures/live-page-streaming.html", import.meta.url), "utf8");
 const source = {
   id: "source-live",
   artist_id: "artist-9mm",
@@ -71,6 +72,11 @@ test("returns deterministic, deduplicated events for repeated collection", () =>
 
 test("does not import a different artist section when the target is absent", () => {
   assert.deepEqual(parseLiveEvents({ ...source, artist_name: "Unknown Artist" }, fixture), []);
+  const unlabeledMultiArtistPage = `
+    <h2>Alpha Band</h2><h3>2026/09/01 Alpha Hall [Tokyo]</h3><p>Event Name: Alpha Show</p><p>START 19:00</p>
+    <h2>Beta Band</h2><h3>2026/09/02 Beta Hall [Tokyo]</h3><p>Event Name: Beta Show</p><p>START 19:00</p>
+  `;
+  assert.deepEqual(parseLiveEvents({ ...source, artist_name: "Missing Band" }, unlabeledMultiArtistPage), []);
 });
 
 test("handles empty and malformed pages without throwing", () => {
@@ -84,4 +90,19 @@ test("handles empty and malformed pages without throwing", () => {
     ),
     []
   );
+});
+
+test("parses yearless multi-day online events and preserves multiple ticket URLs", () => {
+  const events = parseLiveEvents({ ...source, artist_name: "Target Artist", config: { default_year: 2027 } }, streamingFixture);
+
+  assert.equal(events.length, 3);
+  assert.deepEqual(events.slice(0, 2).map((event) => event.starts_at), [
+    "2027-09-20T11:00:00.000Z",
+    "2027-09-21T11:00:00.000Z"
+  ]);
+  assert.equal(events[2].starts_at, "2027-09-22T20:00:00.000Z");
+  assert.ok(events.every((event) => event.venue === "Online / 配信"));
+  assert.ok(events.slice(0, 2).every((event) => event.ticket_url === "https://tickets.example/one"));
+  assert.ok(events.slice(0, 2).every((event) => event.notes.includes("https://tickets.example/two")));
+  assert.equal(events.some((event) => event.title.includes("MUST NOT IMPORT")), false);
 });
